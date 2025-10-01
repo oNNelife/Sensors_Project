@@ -1,0 +1,205 @@
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include <math.h>
+
+// Define I2C constants
+#define F_CPU 16000000UL // CPU frequency
+#define SCL_CLOCK 100000L // I2C clock frequency (100 kHz)
+#define PCF8574_ADDRESS 0x27 // I2C address of the LCD module
+
+// LCD control commands
+#define LCD_CLEAR 0x01
+#define LCD_HOME 0x02
+#define LCD_ENTRY_MODE 0x06
+#define LCD_DISPLAY_ON 0x0C
+#define LCD_FUNCTION_SET 0x28
+#define LCD_SET_DDRAM 0x80
+
+// PCF8574 control pins
+#define LCD_BACKLIGHT 0x08
+#define ENABLE 0x04
+#define READ_WRITE 0x02
+#define REGISTER_SELECT 0x01
+
+// Function prototypes
+void I2C_Init(void);
+void I2C_Start(void);
+void I2C_Stop(void);
+void I2C_Write(uint8_t data);
+void LCD_Init(void);
+void LCD_Command(uint8_t cmd);
+void LCD_Data(uint8_t data);
+void LCD_Send(uint8_t value, uint8_t mode);
+void LCD_SetCursor(uint8_t col, uint8_t row);
+void LCD_Print(const char *str);
+void ADC_Init(void);
+uint16_t ADC_Read(uint8_t channel);
+float GetTemperature(uint16_t adcValue);
+void LCD_PrintFloat(float number, uint8_t decimals);
+float ConvertToFahrenheit(float temperatureC);
+
+int main(void) {
+	I2C_Init();
+	LCD_Init();
+	LCD_SetCursor(0, 0); // Set cursor to home position (0, 0)
+
+	ADC_Init(); // Initialize ADC
+	float lastTemperature = -1000.0; // Initialize to a value that is not likely to be measured
+
+	while (1) {
+		uint16_t adcValue = ADC_Read(0); // Read temperature sensor value (assuming channel 0)
+		float temperature = GetTemperature(adcValue); // Convert ADC value to temperature
+
+		// Read potentiometer to switch between Celsius and Fahrenheit
+		uint16_t potValue = ADC_Read(1); // Read potentiometer value (assuming channel 1)
+
+		// Convert to Fahrenheit if potentiometer value is above midpoint
+		if (potValue > 512) {
+			temperature = ConvertToFahrenheit(temperature);
+		}
+
+		// Only update LCD if temperature has changed significantly
+		if (fabs(temperature - lastTemperature) >= 0.05) { // Check if temperature has changed by at least 0.05°C
+			lastTemperature = temperature;
+
+			LCD_SetCursor(0, 0);     // Reset cursor position to (0, 0)
+			LCD_Print("Temp: ");      // Print the label
+			LCD_PrintFloat(temperature, 2); // Print temperature with 2 decimals
+			
+			if (potValue > 512) {
+				LCD_Print(" F");     // Display Fahrenheit
+				} else {
+				LCD_Print(" C");     // Display Celsius
+			}
+
+			_delay_ms(7000);         // Wait for 5 seconds before refreshing the display
+			} else {
+			_delay_ms(2000);          // Only delay when there are no changes
+		}
+	}
+}
+
+void I2C_Init(void) {
+	TWSR = 0x00; // Set prescaler to 1
+	TWBR = ((F_CPU / SCL_CLOCK) - 16) / 2; // Set SCL frequency
+	TWCR = (1 << TWEN); // Enable TWI
+}
+
+void I2C_Start(void) {
+	TWCR = (1 << TWSTA) | (1 << TWEN) | (1 << TWINT);
+	while (!(TWCR & (1 << TWINT))); // Wait for START to complete
+}
+
+void I2C_Stop(void) {
+	TWCR = (1 << TWSTO) | (1 << TWEN) | (1 << TWINT);
+}
+
+void I2C_Write(uint8_t data) {
+	TWDR = data; // Load data
+	TWCR = (1 << TWEN) | (1 << TWINT);
+	while (!(TWCR & (1 << TWINT))); // Wait for write to complete
+}
+
+void LCD_Init(void) {
+	_delay_ms(50); // Wait for LCD to power up
+	LCD_Send(0x03, 0); // Initialize in 4-bit mode
+	_delay_ms(5);
+	LCD_Send(0x03, 0);
+	_delay_us(150);
+	LCD_Send(0x03, 0);
+	LCD_Send(0x02, 0); // Set to 4-bit mode
+
+	LCD_Command(LCD_FUNCTION_SET); // 4-bit, 2-line, 5x8 dots
+	LCD_Command(LCD_DISPLAY_ON); // Display ON, cursor OFF
+	LCD_Command(LCD_CLEAR); // Clear display
+	LCD_Command(LCD_ENTRY_MODE); // Increment cursor, no shift
+}
+
+void LCD_Command(uint8_t cmd) {
+	LCD_Send(cmd, 0);
+}
+
+void LCD_Data(uint8_t data) {
+	LCD_Send(data, REGISTER_SELECT);
+}
+
+void LCD_Send(uint8_t value, uint8_t mode) {
+	uint8_t highNibble = (value & 0xF0) | mode | LCD_BACKLIGHT;
+	uint8_t lowNibble = ((value << 4) & 0xF0) | mode | LCD_BACKLIGHT;
+
+	I2C_Start();
+	I2C_Write(PCF8574_ADDRESS << 1); // Send address + write bit
+
+	// Send high nibble
+	I2C_Write(highNibble | ENABLE);  // Set E high
+	_delay_us(1);                     // Very short delay (1-2 us is sufficient)
+	I2C_Write(highNibble & ~ENABLE); // Set E low (latch data)
+	_delay_us(1);                     // Crucial delay: hold E low for a short time
+
+	// Send low nibble
+	I2C_Write(lowNibble | ENABLE);   // Set E high
+	_delay_us(1);                     // Very short delay
+	I2C_Write(lowNibble & ~ENABLE);  // Set E low (latch data)
+	_delay_us(1);                     // Crucial delay: hold E low for a short time
+
+	I2C_Stop();
+}
+
+void LCD_SetCursor(uint8_t col, uint8_t row) {
+	uint8_t rowOffsets[] = {0x00, 0x40, 0x14, 0x54};
+	LCD_Command(LCD_SET_DDRAM | (col + rowOffsets[row]));
+}
+
+void LCD_Print(const char *str) {
+	while (*str) {
+		LCD_Data(*str++);
+	}
+}
+
+void LCD_PrintFloat(float number, uint8_t decimals) {
+	char buffer[16];
+	int integerPart = (int)number; // Integer part
+	int decimalPart = (int)((number - integerPart) * pow(10, decimals)); // Decimal part
+
+	// Print integer part
+	itoa(integerPart, buffer, 10); // Convert integer part to string
+	LCD_Print(buffer); // Print integer part
+
+	// Print decimal point
+	LCD_Data('.');
+
+	// Print decimal part (ensure 2 digits)
+	if (decimalPart < 10) {
+		// If decimal part is less than 10, add a leading zero
+		LCD_Data('0');
+	}
+
+	itoa(decimalPart, buffer, 10);
+	LCD_Print(buffer); // Print decimal part
+}
+
+void ADC_Init(void) {
+	ADMUX = (1 << REFS0); // Reference voltage: AVcc
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Enable ADC, prescaler = 64
+}
+
+uint16_t ADC_Read(uint8_t channel) {
+	ADMUX = (ADMUX & 0xF0) | (channel & 0x0F); // Select ADC channel
+	ADCSRA |= (1 << ADSC); // Start conversion
+	while (ADCSRA & (1 << ADSC)); // Wait for conversion to complete
+	return ADC;
+}
+
+float GetTemperature(uint16_t adcValue) {
+	// Assuming 10k thermistor and 5V reference
+	float voltage = (adcValue / 1023.0) * 5.0; // Convert ADC value to voltage
+	float resistance = (5.0 - voltage) * 10000.0 / voltage; // Calculate resistance of thermistor
+	// Using a simplified formula for 10k thermistor at 25°C
+	float temperatureC = 1 / (log(resistance / 10000.0) / 3950.0 + 1 / 298.15) - 273.15;
+	return temperatureC; // Return the temperature in Celsius
+}
+
+float ConvertToFahrenheit(float temperatureC) {
+	return (temperatureC * 9.0 / 5.0) + 32.0; // Convert Celsius to Fahrenheit
+}
